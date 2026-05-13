@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "tunnel": "localtunnel --port 5000 --local-host 127.0.0.1"
+  },
+  "dependencies": {
+    "localtunnel": "^2.0.2"
+  }
+}

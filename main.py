@@ -1,5 +1,15 @@
 from flask import Flask, request, jsonify, Response
-import json, queue
+from dotenv import load_dotenv
+import json
+import os
+import queue
+
+import ngrok
+
+load_dotenv()
+
+PORT = int(os.getenv("PORT", "5000"))
+HOST = os.getenv("HOST", "0.0.0.0")
 
 app = Flask(__name__)
 event_queue = queue.Queue()
@@ -26,4 +36,22 @@ def stream():
 def index():
     return app.send_static_file("index.html")
 
-app.run(host="0.0.0.0", port=5000, threaded=True)
+def start_ngrok_tunnel():
+    authtoken = os.getenv("NGROK_AUTHTOKEN")
+    if not authtoken:
+        print("NGROK_AUTHTOKEN is not set; running only on the local network.")
+        return None
+
+    domain = os.getenv("NGROK_DOMAIN")
+    forward_options = {"authtoken": authtoken}
+    if domain:
+        forward_options["domain"] = domain
+
+    listener = ngrok.forward(PORT, **forward_options)
+    print(f"ngrok tunnel online: {listener.url()}")
+    return listener
+
+
+if __name__ == "__main__":
+    start_ngrok_tunnel()
+    app.run(host=HOST, port=PORT, threaded=True)

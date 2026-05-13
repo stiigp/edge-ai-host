@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Edge AI — Gesture Demo</title>
+  <style>
+    body { font-family: sans-serif; display: flex; flex-direction: column;
+           align-items: center; justify-content: center; height: 100vh;
+           background: #0f0f0f; color: white; margin: 0; }
+    #gesto { font-size: 8rem; transition: transform 0.2s; }
+    #label { font-size: 2rem; margin-top: 1rem; color: #aaa; }
+    #conf  { font-size: 1.2rem; color: #666; }
+    .pop   { transform: scale(1.3) !important; }
+  </style>
+</head>
+<body>
+  <div id="gesto">🤷</div>
+  <div id="label">Aguardando gesto...</div>
+  <div id="conf"></div>
+
+  <script>
+    const EMOJIS = { idle: "😴", wave: "👋", updown: "↕️", snake: "🐍" };
+
+    const src = new EventSource("/stream");
+    src.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.ping) return;
+
+      const el = document.getElementById("gesto");
+      el.textContent = EMOJIS[d.gesto] ?? "❓";
+      el.classList.add("pop");
+      setTimeout(() => el.classList.remove("pop"), 200);
+
+      document.getElementById("label").textContent = d.gesto.toUpperCase();
+      document.getElementById("conf").textContent = `Confiança: ${d.gesto_conf ?? d.confianca?.toFixed(1)}%`;
+    };
+  </script>
+</body>
+</html>

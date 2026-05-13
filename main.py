@@ -1,20 +1,20 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, jsonify, Response
 from dotenv import load_dotenv
+import paho.mqtt.client as mqtt
 import atexit
 import json
 import os
 import queue
 import socket
-import shutil
-import subprocess
-import threading
-import time
 
 load_dotenv()
 
 PORT = int(os.getenv("PORT", "5000"))
 HOST = os.getenv("HOST", "0.0.0.0")
-ENABLE_LOCALTUNNEL = os.getenv("ENABLE_LOCALTUNNEL", "true").lower() in ("1", "true", "yes", "on")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "broker.emqx.io")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "edge-ai-host/gestos")
+MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", f"edge-ai-host-{socket.gethostname()}-{os.getpid()}")
 
 app = Flask(__name__)
 event_queue = queue.Queue()
@@ -23,12 +23,81 @@ event_queue = queue.Queue()
 def health():
     return jsonify({"status": "ok!"})
 
-@app.route("/gesto", methods=["POST"])
-def receber_gesto():
-    data = request.json
+def publish_gesture_event(data):
     event_queue.put(data)
-    print(f"Gesto: {data['gesto']} ({data['confianca']:.1f}%)")
-    return jsonify({"ok": True})
+    gesture = data.get("gesto", "desconhecido")
+    confidence = data.get("confianca", data.get("gesto_conf"))
+
+    if isinstance(confidence, (int, float)):
+        print(f"Gesto: {gesture} ({confidence:.1f}%)")
+    else:
+        print(f"Gesto: {gesture}")
+
+
+def decode_mqtt_payload(payload):
+    text = payload.decode("utf-8")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = {"gesto": text}
+
+    if not isinstance(data, dict):
+        raise ValueError("MQTT payload must be a JSON object or a gesture string.")
+
+    if "gesto" not in data:
+        raise ValueError("MQTT payload is missing the 'gesto' field.")
+
+    return data
+
+
+def create_mqtt_client():
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id=MQTT_CLIENT_ID,
+        protocol=mqtt.MQTTv311,
+    )
+
+    def on_connect(client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
+            print(f"MQTT connected to {MQTT_BROKER}:{MQTT_PORT}; subscribing to {MQTT_TOPIC}")
+            client.subscribe(MQTT_TOPIC, qos=0)
+        else:
+            print(f"MQTT connection failed with code {reason_code}")
+
+    def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+        if reason_code != 0:
+            print(f"MQTT disconnected unexpectedly with code {reason_code}; reconnecting in the background.")
+
+    def on_message(client, userdata, message):
+        try:
+            data = decode_mqtt_payload(message.payload)
+        except (UnicodeDecodeError, ValueError) as exc:
+            print(f"Ignoring MQTT message on {message.topic}: {exc}")
+            return
+
+        publish_gesture_event(data)
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_message = on_message
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+
+    return client
+
+
+def start_mqtt():
+    client = create_mqtt_client()
+    client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    client.loop_start()
+    print("MQTT client starting...")
+
+    def stop_mqtt():
+        client.loop_stop()
+        client.disconnect()
+
+    atexit.register(stop_mqtt)
+    return client
 
 @app.route("/stream")
 def stream():
@@ -45,88 +114,7 @@ def stream():
 def index():
     return app.send_static_file("index.html")
 
-def wait_for_local_server(timeout=15):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", PORT), timeout=0.5):
-                return True
-        except OSError:
-            time.sleep(0.25)
-
-    return False
-
-
-def get_localtunnel_command():
-    local_bin = os.path.join(os.getcwd(), "node_modules", ".bin", "lt.cmd")
-    if os.path.exists(local_bin):
-        return [local_bin]
-
-    local_bin = os.path.join(os.getcwd(), "node_modules", ".bin", "lt")
-    if os.path.exists(local_bin):
-        return [local_bin]
-
-    npx = shutil.which("npx") or shutil.which("npx.cmd")
-    if npx:
-        return [npx, "--yes", "localtunnel"]
-
-    return None
-
-
-def start_localtunnel():
-    if not ENABLE_LOCALTUNNEL:
-        print("localtunnel is disabled; running only on the local network.")
-        return None
-
-    if not wait_for_local_server():
-        print(f"localtunnel was not started because http://127.0.0.1:{PORT} did not respond.")
-        return None
-
-    command = get_localtunnel_command()
-    if command is None:
-        print("localtunnel was not started because Node.js/npm is not installed.")
-        return None
-
-    command.extend(["--port", str(PORT), "--local-host", "127.0.0.1", "--host", "http://loca.lt"])
-
-    subdomain = os.getenv("LOCALTUNNEL_SUBDOMAIN")
-    if subdomain:
-        command.extend(["--subdomain", subdomain])
-
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
-    def pipe_output():
-        if process.stdout is None:
-            return
-
-        for line in process.stdout:
-            print(f"localtunnel: {line}", end="")
-
-    threading.Thread(target=pipe_output, daemon=True).start()
-
-    def report_exit():
-        exit_code = process.wait()
-        print(f"localtunnel stopped with exit code {exit_code}.")
-
-    threading.Thread(target=report_exit, daemon=True).start()
-
-    def stop_localtunnel():
-        if process.poll() is None:
-            process.terminate()
-
-    atexit.register(stop_localtunnel)
-    print("localtunnel starting...")
-    return process
-
 
 if __name__ == "__main__":
-    tunnel_thread = threading.Timer(1.0, start_localtunnel)
-    tunnel_thread.daemon = True
-    tunnel_thread.start()
+    mqtt_client = start_mqtt()
     app.run(host=HOST, port=PORT, threaded=True)
